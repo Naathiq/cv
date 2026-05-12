@@ -1,52 +1,83 @@
 import cv2
 import numpy as np
 
-# --- STEP 1: Setup Video & Background ---
-cap = cv2.VideoCapture("video.mp4")
-fgbg = cv2.createBackgroundSubtractorMOG2()
+cap = cv2.VideoCapture(r"D:\Users\yesur\Program Files - PHY\video1.mp4")   # or 0
 
-# --- STEP 2: Setup Kalman Filter ---
-# 4 states (x, y, dx, dy) and 2 measurements (x, y)
-kf = cv2.KalmanFilter(4, 2)
+# Kalman Filter
+kalman = cv2.KalmanFilter(4, 2)
 
-kf.measurementMatrix = np.array([[1, 0, 0, 0], 
-                                 [0, 1, 0, 0]], np.float32)
+kalman.measurementMatrix = np.array([[1,0,0,0],
+                                     [0,1,0,0]], np.float32)
 
-kf.transitionMatrix = np.array([[1, 0, 1, 0], 
-                                [0, 1, 0, 1], 
-                                [0, 0, 1, 0], 
-                                [0, 0, 0, 1]], np.float32)
+kalman.transitionMatrix = np.array([[1,0,1,0],
+                                    [0,1,0,1],
+                                    [0,0,1,0],
+                                    [0,0,0,1]], np.float32)
 
-# --- STEP 3: Main Loop & Masking ---
+kalman.processNoiseCov = np.eye(4, dtype=np.float32) * 0.03
+kalman.measurementNoiseCov = np.eye(2, dtype=np.float32) * 5
+
+kalman.statePre = np.zeros((4,1), np.float32)
+initialized = False
+
+ret, prev_frame = cap.read()
+prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
+
 while True:
+    cv2.namedWindow("Motion", cv2.WINDOW_NORMAL)
+    cv2.namedWindow("Tracking", cv2.WINDOW_NORMAL)
     ret, frame = cap.read()
-    if not ret: break
-    
-    mask = fgbg.apply(frame)
-    _, mask = cv2.threshold(mask, 200, 255, cv2.THRESH_BINARY)
-    
-    # --- STEP 4: Find Contours ---
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    # --- STEP 5: Track the Largest Object ---
-    if contours:
-        # Find the biggest blob to avoid the multi-car bug
-        c = max(contours, key=cv2.contourArea)
-        
-        if cv2.contourArea(c) > 1500:
-            x, y, w, h = cv2.boundingRect(c)
-            cx, cy = x + w//2, y + h//2  # Center point
-            
-            # Kalman: Correct -> Predict -> Draw
-            kf.correct(np.array([[np.float32(cx)], [np.float32(cy)]]))
-            pred = kf.predict()
-            px, py = int(pred[0]), int(pred[1])
-            
-            cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
-            cv2.circle(frame, (px, py), 5, (0, 0, 255), -1)
+    if not ret:
+        break
 
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+    # 🔹 Motion Detection (Frame Difference)
+    diff = cv2.absdiff(prev_gray, gray)
+    _, thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)
+
+    thresh = cv2.dilate(thresh, None, iterations=2)
+
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    # Predict
+    predicted = kalman.predict()
+    px, py = int(predicted[0][0]), int(predicted[1][0])
+
+    if len(contours) > 0:
+        cnt = max(contours, key=cv2.contourArea)
+
+        if cv2.contourArea(cnt) > 500:
+            x, y, w, h = cv2.boundingRect(cnt)
+
+            mx = x + w//2
+            my = y + h//2
+
+            measurement = np.array([[np.float32(mx)],
+                                    [np.float32(my)]])
+
+            if not initialized:
+                kalman.statePre = np.array([[mx],
+                                            [my],
+                                            [0],
+                                            [0]], np.float32)
+                initialized = True
+
+            kalman.correct(measurement)
+
+            # Red = detected
+            cv2.circle(frame, (mx, my), 5, (0,0,255), -1)
+
+    # Green = predicted
+    cv2.circle(frame, (px, py), 5, (0,255,0), -1)
+
+    cv2.imshow("Motion", thresh)
     cv2.imshow("Tracking", frame)
-    if cv2.waitKey(30) == 27: break # Press ESC to exit
+
+    prev_gray = gray.copy()
+
+    if cv2.waitKey(30) & 0xFF == 27:
+        break
 
 cap.release()
 cv2.destroyAllWindows()
